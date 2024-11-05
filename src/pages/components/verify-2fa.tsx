@@ -5,7 +5,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/router';
 
 export default function Verify2FA() {
-  
+
   const [token, setToken] = useState('');
   const [error, setError] = useState('');
 
@@ -27,7 +27,7 @@ export default function Verify2FA() {
 
       if (res.ok) {
         localStorage.setItem('token', data.token);
-        router.push('/chat');
+        router.push('/components/chat');
       } else {
         setError(data.message);
       }

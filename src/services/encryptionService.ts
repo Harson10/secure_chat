@@ -1,9 +1,7 @@
-
 import crypto from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
-// const AUTH_TAG_LENGTH = 16;
 
 export const encryptionService = {
   generateKeyPair: () => {
@@ -15,7 +13,6 @@ export const encryptionService = {
     return { publicKey, privateKey };
   },
 
-  // Fonction utilitaire pour formater la clé privée
   formatPrivateKey: (privateKey: string): string => {
     if (!privateKey.includes('BEGIN PRIVATE KEY') && !privateKey.includes('END PRIVATE KEY')) {
       return `-----BEGIN PRIVATE KEY-----\n${privateKey}\n-----END PRIVATE KEY-----`;
@@ -23,7 +20,6 @@ export const encryptionService = {
     return privateKey;
   },
 
-  // Fonction utilitaire pour formater la clé publique
   formatPublicKey: (publicKey: string): string => {
     if (!publicKey.includes('BEGIN PUBLIC KEY') && !publicKey.includes('END PUBLIC KEY')) {
       return `-----BEGIN PUBLIC KEY-----\n${publicKey}\n-----END PUBLIC KEY-----`;
@@ -82,13 +78,19 @@ export const encryptionService = {
 
       const authTag = cipher.getAuthTag();
 
-      const result = JSON.stringify({
+      const encryptedData = {
         iv: iv.toString('base64'),
         content: encrypted,
         authTag: authTag.toString('base64')
-      });
+      };
 
-      return Buffer.from(result).toString('base64');
+      const jsonString = JSON.stringify(encryptedData);
+      console.log('Debug - Encrypted Data JSON:', jsonString);
+
+      const base64Result = Buffer.from(jsonString).toString('base64');
+      console.log('Debug - Final base64:', base64Result);
+
+      return base64Result;
     } catch (error) {
       console.error('Error encrypting message symmetrically:', error);
       throw new Error('Symmetric encryption failed: ' + error);
@@ -97,27 +99,67 @@ export const encryptionService = {
 
   decryptSymmetric: (encryptedMessage: string, rawPrivateKey: string) => {
     try {
+      console.log('Debug - Input encryptedMessage:', encryptedMessage);
+
+      // Vérification initiale
+      if (!encryptedMessage) {
+        throw new Error('Encrypted message is empty or null');
+      }
+
+      // Tentative de décodage base64
+      let jsonStr;
+      try {
+        jsonStr = Buffer.from(encryptedMessage, 'base64').toString('utf8');
+        console.log('Debug - Decoded JSON string:', jsonStr);
+      } catch (e) {
+        console.error('Debug - Base64 decode error:', e);
+        throw new Error('Failed to decode base64 message');
+      }
+
+      // Tentative de parsing JSON
+      let encryptedData;
+      try {
+        encryptedData = JSON.parse(jsonStr);
+        console.log('Debug - Parsed JSON data:', encryptedData);
+      } catch (e) {
+        console.error('Debug - JSON parse error:', e);
+        throw new Error('Failed to parse JSON: ' + e);
+      }
+
+      // Vérification de la structure
+      if (!encryptedData || typeof encryptedData !== 'object') {
+        throw new Error('Decrypted data is not an object');
+      }
+
+      if (!encryptedData.iv || !encryptedData.content || !encryptedData.authTag) {
+        throw new Error(`Missing required fields. Got: ${Object.keys(encryptedData).join(', ')}`);
+      }
+
       const privateKey = encryptionService.formatPrivateKey(rawPrivateKey);
       const hash = crypto.createHash('sha256');
       hash.update(privateKey);
       const key = hash.digest();
 
-      const encryptedData = JSON.parse(Buffer.from(encryptedMessage, 'base64').toString());
+      try {
+        const decipher = crypto.createDecipheriv(
+          ALGORITHM,
+          key,
+          Buffer.from(encryptedData.iv, 'base64')
+        );
 
-      const decipher = crypto.createDecipheriv(
-        ALGORITHM,
-        key,
-        Buffer.from(encryptedData.iv, 'base64')
-      );
+        decipher.setAuthTag(Buffer.from(encryptedData.authTag, 'base64'));
 
-      decipher.setAuthTag(Buffer.from(encryptedData.authTag, 'base64'));
+        let decrypted = decipher.update(encryptedData.content, 'base64', 'utf8');
+        decrypted += decipher.final('utf8');
 
-      let decrypted = decipher.update(encryptedData.content, 'base64', 'utf8');
-      decrypted += decipher.final('utf8');
-
-      return decrypted;
+        console.log('Debug - Successfully decrypted message');
+        return decrypted;
+      } catch (e) {
+        console.error('Debug - Decryption error:', e);
+        throw new Error('Failed during final decryption step: ' + e);
+      }
     } catch (error) {
-      console.error('Error decrypting message symmetrically:', error);
+      console.error('Debug - Top level error:', error);
       throw new Error('Symmetric decryption failed: ' + error);
     }
   }

@@ -1,390 +1,104 @@
-j'ai un projet avec Nextjs, typescript, prisma et postgres. il s'agit d'un projet de chat securisé basé sur le chiffrement de bout en bout. pour cela j'ai deja quelques base:
+salut, dans mon projet chat securisé basé sur le chiffrement de bout en bout et l'authentification multifacteur,  j'ai integré nextauth pour l'inscription et la connexion, mais je n'ai pas encore fini de mettre a jour les autres api et les composants, voici nextauth:
 
-dans schema.prisma je viens d'ajouter un attribut "encryptedContentCU" dans le champ Message pour l'utilisateur actuel:
-
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-
-generator client {
-  provider = "prisma-client-js"
-}
-
-model User {
-  id                 Int            @id @default(autoincrement())
-  username           String         @unique
-  email              String         @unique
-  hashedPassword     String
-  publicKey          String
-  privateKey         String
-  twoFactorSecret    String?
-  isTwoFactorEnabled Boolean        @default(false)
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
-  sentMessages       Message[]      @relation("SentMessages")
-  receivedMessages   Message[]      @relation("ReceivedMessages")
-  conversations      Conversation[]
-}
-
-model Message {
-  id                 Int          @id @default(autoincrement())
-  senderId           Int
-  sender             User         @relation("SentMessages", fields: [senderId], references: [id])
-  receiverId         Int
-  receiver           User         @relation("ReceivedMessages", fields: [receiverId], references: [id])
-  encryptedContent   String
-  encryptedContentCU String
-  createdAt          DateTime     @default(now())
-  conversationId     Int
-  conversation       Conversation @relation(fields: [conversationId], references: [id])
-}
-
-model Conversation {
-  id           Int       @id @default(autoincrement())
-  participants User[]
-  messages     Message[]
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-}
-
-
-j'ai le fichier actuel encryptioService.ts:
-
-import crypto from 'crypto';
-
-export const encryptionService = {
-  generateKeyPair: () => {
-    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: 'spki', format: 'pem' },
-      privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-    });
-    return { publicKey, privateKey };
-  },
-
-  encryptMessage: (message: string, publicKey: string) => {
-    try {
-      const encryptedBuffer = crypto.publicEncrypt(
-        {
-          key: publicKey,
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256'
-        },
-        Buffer.from(message, 'utf8')
-      );
-      return encryptedBuffer.toString('base64');
-    } catch (error) {
-      console.error('Error encrypting message:', error);
-      throw new Error('Encryption failed: ' + error);
-    }
-  },
-
-  decryptMessage: (encryptedMessage: string, privateKey: string) => {
-    try {
-      const decryptedBuffer = crypto.privateDecrypt(
-        {
-          key: privateKey,
-          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: 'sha256'
-        },
-        Buffer.from(encryptedMessage, 'base64')
-      );
-      return decryptedBuffer.toString('utf8');
-    } catch (error) {
-      console.error('Error decrypting message:', error);
-      throw new Error('Decryption failed: ' + error);
-    }
-  }
-};
-
-send-message.ts: 
-
-
-
-import { NextApiRequest, NextApiResponse } from 'next';
+import NextAuth, { AuthOptions } from 'next-auth';
+import CredentialsProvider from 'next-auth/providers/credentials';
 import { PrismaClient } from '@prisma/client';
 import { authService } from '@/services/authService';
 
 const prisma = new PrismaClient();
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ message: 'Méthode non supportée' });
-  }
+export const authOptions: AuthOptions = {
+    providers: [
+        CredentialsProvider({
+            name: 'Credentials',
+            credentials: {
+                email: { label: "Email", type: "email" },
+                password: { label: "Password", type: "password" }
+            },
+            async authorize(credentials) {
+                if (!credentials?.email || !credentials?.password) {
+                    throw new Error('Email et mot de passe requis');
+                }
 
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) {
-    return res.status(401).json({ message: 'Non autorisé' });
-  }
+                const user = await prisma.user.findUnique({
+                    where: { email: credentials.email }
+                });
 
-  try {
-    const decodedToken = authService.verifyToken(token);
-    if (!decodedToken) {
-      return res.status(401).json({ message: 'Token invalide' });
-    }
+                if (!user) {
+                    throw new Error('Utilisateur non trouvé');
+                }
 
-    const { receiverId, encryptedContent, conversationId } = req.body;
+                const isPasswordValid = await authService.verifyPassword(
+                    credentials.password,
+                    user.hashedPassword
+                );
 
-    console.log('Received message data:', { receiverId, conversationId, encryptedContent });
+                if (!isPasswordValid) {
+                    throw new Error('Mot de passe incorrect');
+                }
 
-    if (!receiverId || !encryptedContent || !conversationId) {
-      return res.status(400).json({ message: 'Données manquantes' });
-    }
+                if (user.isTwoFactorEnabled) {
+                    return {
+                        id: user.id.toString(),
+                        email: user.email,
+                        requires2FA: true,
+                        username: user.username
+                    };
+                }
 
-    const message = await prisma.message.create({
-      data: {
-        senderId: decodedToken.userId,
-        receiverId,
-        encryptedContent,
-        conversationId,
-      },
-    });
-
-    console.log('Created message:', message);
-
-    res.status(201).json({ message: 'Message envoyé avec succès', data: message });
-  } catch (error) {
-    console.error('Erreur lors de l\'envoi du message:', error);
-    res.status(500).json({ message: 'Erreur lors de l\'envoi du message', error });
-  }
-}
-
-
-messages.ts:
-
-// Importation des dépendances nécessaires
-import { NextApiRequest, NextApiResponse } from 'next';
-import { PrismaClient } from '@prisma/client';
-import { authService } from '../../services/authService';
-
-// Création d'une instance de PrismaClient
-const prisma = new PrismaClient();
-
-/**
- * Fonction de gestion de la requête de récupération des messages
- * @param req Requête HTTP
- * @param res Réponse HTTP
- */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-
-  if (req.method !== 'GET') {
-    return res.status(405).json({ message: 'Methode supportée' });
-  }
-
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) {
-    return res.status(401).json({ message: 'Non autorisée' });
-  }
-
-  const decodedToken = authService.verifyToken(token);
-  if (!decodedToken) {
-    return res.status(401).json({ message: 'Token invalide' });
-  }
-
-  // Récupération de l'ID de conversation dans les paramètres de la requête
-  const { conversationId } = req.query;
-
-  // Vérification de la présence de l'ID de conversation
-  if (!conversationId) {
-    return res.status(400).json({ message: 'ID de conversation requis' });
-  }
-
-  try {
-    // Récupération des messages de la conversation
-    const messages = await prisma.message.findMany({
-      // Filtre des messages par ID de conversation et par utilisateur dans la conversation
-      where: {
-        conversationId: Number(conversationId),
-        conversation: {
-          participants: {
-            some: {
-              id: decodedToken.userId
+                return {
+                    id: user.id.toString(),
+                    email: user.email,
+                    name: user.username,
+                    username: user.username
+                };
             }
-          }
+        })
+    ],
+    callbacks: {
+        async jwt({ token, user }) {
+            if (user) {
+                token.id = user.id;
+                token.requires2FA = user.requires2FA;
+            }
+            return token;
+        },
+        async session({ session, token }) {
+            if (session.user) {
+                session.user.id = token.id;
+                session.user.requires2FA = token.requires2FA;
+            }
+            return session;
         }
-      },
-      // Ordre les messages par date de création
-      orderBy: {
-        createdAt: 'asc'
-      },
-      // Sélectionne les champs à récupérer
-      select: {
-        id: true,
-        senderId: true,
-        encryptedContent: true,
-        createdAt: true
-      }
-    });
+    },
+    pages: {
+        signIn: '/components/login',
+        error: '/components/login',
+    },
+    session: {
+        strategy: 'jwt',
+    },
+};
 
-    // Retour des messages sous forme de JSON
-    res.status(200).json({ messages });
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la recuperation des messages: ' + error });
-  }
+export default NextAuth(authOptions);
+
+_app.tsx:
+// These styles apply to every route in the application
+import '@/styles/globals.css'
+import type { AppProps } from 'next/app'
+
+export default function App({ Component, pageProps }: AppProps) {
+  return <Component {...pageProps} />
 }
 
-register.ts:
-
-import { NextApiRequest, NextApiResponse } from 'next';
-import { PrismaClient } from '@prisma/client';
-import { authService } from '../../services/authService';
-import { encryptionService } from '../../services/encryptionService';
-
-const prisma = new PrismaClient();
-
-/**
- * Fonction de gestion de la requête d'inscription
- * @param req Requête HTTP
- * @param res Réponse HTTP
- */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  
-  if (req.method !== 'POST') {
-    return res.status(405).json({ message: 'Méthode non supportée' });
-  }
-
-  const { username, email, password } = req.body;
-
-  try {
-    const hashedPassword = await authService.hashPassword(password);
-    const { publicKey, privateKey } = encryptionService.generateKeyPair();
-
-    // Création d'un nouvel utilisateur dans la base de données
-    const user = await prisma.user.create({
-      data: {
-        username,
-        email,
-        hashedPassword,
-        publicKey,
-        privateKey
-      },
-    });
-
-    const token = authService.generateToken(user.id);
-
-    res.status(201).json({
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-      },
-      token,
-      privateKey,
-    });
-  } catch (error) {
-    res.status(400).json({ message: 'Erreur lors de l\'inscription:', error });
-  }
-}
-
-register.tsx:
-
-/* eslint-disable react/no-unescaped-entities */
-'use client';
-
-import { useState } from 'react';
-import { useRouter } from 'next/router';
-
-export default function Register() {
-  
-  const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-
-  const router = useRouter();
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    try {
-      const res = await fetch('/api/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password }),
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        localStorage.setItem('token', data.token);
-        localStorage.setItem('privateKey', data.privateKey);
-
-        router.push('/components/chat');
-      } else {
-        setError(data.message);
-      }
-    } catch (error) {
-      setError('An error occurred. Please try again: ' + error);
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-100 flex flex-col justify-center items-center">
-      <h1 className="text-3xl font-bold mb-6">Register</h1>
-      <form onSubmit={handleSubmit} className="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
-        <div className="mb-4">
-          <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="username">
-            Nom d'utilisateur
-          </label>
-          <input
-            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-            id="username"
-            type="text"
-            placeholder="Nom d'utilisateur"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-          />
-        </div>
-        <div className="mb-4">
-          <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="email">
-            Email
-          </label>
-          <input
-            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-            id="email"
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-          />
-        </div>
-        <div className="mb-6">
-          <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="password">
-            Mot de passe
-          </label>
-          <input
-            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 mb-3 leading-tight focus:outline-none focus:shadow-outline"
-            id="password"
-            type="password"
-            placeholder="********"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
-        </div>
-        {error && <p className="text-red-500 text-xs italic mb-4">{error}</p>}
-        <div className="flex items-center justify-between">
-          <button
-            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-            type="submit"
-          >
-            S'inscrire
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-et puis chat.tsx:
+chat.tsx:
+/* eslint-disable react-hooks/exhaustive-deps */
 'use client';
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import { encryptionService } from '@/services/encryptionService';
+import { io, Socket } from 'socket.io-client';
 
 interface Conversation {
   id: number;
@@ -403,9 +117,8 @@ interface Message {
   createdAt: string;
 }
 
-// Fonction principale du composant Chat
 export default function Chat() {
-
+  const [socket, setSocket] = useState<Socket | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null);
   const [message, setMessage] = useState('');
@@ -414,41 +127,80 @@ export default function Chat() {
   const [currentUserId, setCurrentUserId] = useState(0);
   const router = useRouter();
 
+  // Initialisation de Socket.IO
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      router.push('/login');
+      return;
+    }
+
+    // Connexion au serveur Socket.IO
+    const newSocket = io(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001', {
+      auth: {
+        token
+      }
+    });
+
+    // Écoute des événements Socket.IO
+    newSocket.on('connect', () => {
+      console.log('Connected to Socket.IO server');
+    });
+
+    newSocket.on('new_message', (newMessage: Message) => {
+      if (selectedConversation && newMessage.senderId === selectedConversation.recipientId) {
+        setSelectedConversation(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            messages: [...(prev.messages || []), newMessage]
+          };
+        });
+      }
+    });
+
+    newSocket.on('conversation_created', (newConversation: Conversation) => {
+      setConversations(prev => [...prev, newConversation]);
+    });
+
+    setSocket(newSocket);
+
+    // Nettoyage à la déconnexion
+    return () => {
+      newSocket.close();
+    };
+  }, []);
+
   useEffect(() => {
     fetchCurrentUser();
     fetchConversations();
-    const fetchKeys = async () => {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        router.push('/login');
-        return;
-      }
-
-      try {
-        const res = await fetch('/api/get-keys', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = await res.json();
-        if (res.ok) {
-          localStorage.setItem('privateKey', data.privateKey);
-          console.log('Private key retrieved and stored');
-        } else {
-          setError(data.message);
-        }
-      } catch (error) {
-        console.error('Error fetching keys:', error);
-        setError('Une erreur est survenue lors de la récupération des clés');
-      }
-    };
-
     fetchKeys();
-    // if (selectedConversation) {
-    //   fetchMessages(selectedConversation.id);
-    // }
   }, []);
-  // }, [selectedConversation]);
 
-  // Récupération de l'utilisateur courant
+  const fetchKeys = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      router.push('/login');
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/get-keys', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        localStorage.setItem('privateKey', data.privateKey);
+        console.log('Private key retrieved and stored');
+      } else {
+        setError(data.message);
+      }
+    } catch (error) {
+      console.error('Error fetching keys:', error);
+      setError('Une erreur est survenue lors de la récupération des clés');
+    }
+  };
+
   const fetchCurrentUser = async () => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -471,7 +223,6 @@ export default function Chat() {
     }
   };
 
-  // Récupération des conversations
   const fetchConversations = async () => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -494,9 +245,8 @@ export default function Chat() {
     }
   };
 
-  // Fonction pour envoyer un message
   const sendMessage = async () => {
-    if (!selectedConversation || !message) return;
+    if (!selectedConversation || !message || !socket) return;
 
     const token = localStorage.getItem('token');
     const privateKey = localStorage.getItem('privateKey');
@@ -507,39 +257,27 @@ export default function Chat() {
     }
 
     try {
-
       const encryptedForSender = encryptionService.encryptSymmetric(message, privateKey);
-      const encryptedForReceiver = encryptionService.encryptAsymmetric(message, selectedConversation.recipientPublicKey);
+      const encryptedForReceiver = encryptionService.encryptAsymmetric(
+        message,
+        selectedConversation.recipientPublicKey
+      );
 
-      const res = await fetch('/api/send-message', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          conversationId: selectedConversation.id,
-          receiverId: selectedConversation.recipientId,
-          encryptedContent: encryptedForReceiver,
-          encryptedContentCU: encryptedForSender,
-        }),
+      // Émission du message via Socket.IO
+      socket.emit('send_message', {
+        conversationId: selectedConversation.id,
+        receiverId: selectedConversation.recipientId,
+        encryptedContent: encryptedForReceiver,
+        encryptedContentCU: encryptedForSender,
       });
 
-      const data = await res.json();
-      if (res.ok) {
-        setMessage('');
-        fetchMessages(selectedConversation.id);
-      } else {
-        setError(data.message);
-      }
+      setMessage('');
     } catch (error) {
       console.error('Error in sendMessage:', error);
       setError('Une erreur est survenue lors de l\'envoi du message: ' + error);
     }
   };
 
-
-  // decryptage
   const decryptMessage = (message: Message) => {
     const privateKey = localStorage.getItem('privateKey');
     if (!privateKey) {
@@ -548,13 +286,11 @@ export default function Chat() {
     }
 
     try {
-      // Assurer que la clé privée est au bon format pour le déchiffrement
       const formattedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${privateKey}\n-----END PRIVATE KEY-----`;
 
       if (message.senderId === currentUserId) {
         return encryptionService.decryptSymmetric(message.encryptedContentCU, formattedPrivateKey);
-      }
-      else {
+      } else {
         return encryptionService.decryptAsymmetric(message.encryptedContent, formattedPrivateKey);
       }
     } catch (error) {
@@ -563,9 +299,6 @@ export default function Chat() {
     }
   };
 
-
-
-  // Fonction pour récupérer les messages d'une conversation
   const fetchMessages = async (conversationId: number) => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -579,7 +312,6 @@ export default function Chat() {
       });
       const data = await res.json();
       if (res.ok && selectedConversation) {
-        // Mise à jour de l'état avec les messages récupérés
         setSelectedConversation({ ...selectedConversation, messages: data.messages });
       } else {
         setError(data.message);
@@ -589,46 +321,41 @@ export default function Chat() {
     }
   };
 
-  // Fonction pour créer une nouvelle conversation
   const createNewConversation = async () => {
     const token = localStorage.getItem('token');
-    if (!token) {
+    if (!token || !socket) {
       router.push('/login');
       return;
     }
 
     try {
-      const res = await fetch('/api/create-conversation', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ recipientUsername: newRecipient }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        // Mise à jour de l'état avec la nouvelle conversation créée
-        setConversations([...conversations, data.conversation]);
-        setNewRecipient('');
-      } else {
-        setError(data.message);
-      }
+      // Émission de l'événement de création de conversation via Socket.IO
+      socket.emit('create_conversation', { recipientUsername: newRecipient });
+      setNewRecipient('');
     } catch (error) {
       setError('Une erreur est survenue lors de la création de la nouvelle conversation:' + error);
     }
   };
 
-  // Affichage du composant
+  useEffect(() => {
+    if (selectedConversation) {
+      fetchMessages(selectedConversation.id);
+
+      // Rejoindre la salle de conversation
+      socket?.emit('join_conversation', selectedConversation.id);
+    }
+  }, [selectedConversation]);
+
+  // Le reste du JSX reste inchangé
   return (
-    <div className="min-h-screen bg-gray-100 flex">
-      <div className="w-1/4 bg-white border-r">
-        <h2 className="text-xl font-bold p-4">Conversations</h2>
+    <div className="flex min-h-screen bg-gray-100">
+      <div className="h-screen w-1/4 overflow-y-hidden border-r bg-white">
+        <h2 className="p-4 text-xl font-bold">Conversations</h2>
         <ul>
           {conversations.map((conv) => (
             <li
               key={conv.id}
-              className="p-4 hover:bg-gray-100 cursor-pointer"
+              className="cursor-pointer p-4 hover:bg-gray-100"
               onClick={() => setSelectedConversation(conv)}
             >
               {conv.recipientUsername}
@@ -640,62 +367,57 @@ export default function Chat() {
             type="text"
             value={newRecipient}
             onChange={(e) => setNewRecipient(e.target.value)}
-            className="w-full border rounded p-2 px-4"
+            className="w-full rounded border p-2 px-4"
             placeholder="Nouveau déstinataire (Nom d'utilisateur)"
           />
           <button
             onClick={createNewConversation}
-            className="mt-2 bg-green-500 text-white px-4 py-2 rounded w-full"
+            className="mt-2 w-full rounded bg-green-500 px-4 py-2 text-white"
           >
             Nouvelle conversation
           </button>
         </div>
       </div>
-      <div className="w-3/4 flex flex-col">
+      <div className="flex h-screen w-3/4 flex-col overflow-y-hidden">
         {selectedConversation ? (
           <>
             <div className="flex-1 overflow-y-auto p-4">
               {selectedConversation.messages && selectedConversation.messages.map((msg) => (
                 <div key={msg.id} className={`mb-4 ${msg.senderId === selectedConversation.recipientId ? 'text-left' : 'text-right'}`}>
-                  <p className="bg-blue-500 text-white rounded-lg p-2 inline-block">
+                  <p className="inline-block rounded-lg bg-blue-500 p-2 text-white">
                     {decryptMessage(msg)}
                   </p>
                 </div>
               ))}
             </div>
-            <div className="p-4 bg-white">
+            <div className="bg-white p-4">
               <input
                 type="text"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                className="w-full border rounded p-2"
+                className="w-full rounded border p-2"
                 placeholder="Taper un message..."
+                onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
               />
               <button
                 onClick={sendMessage}
-                className="mt-2 bg-blue-500 text-white px-4 py-2 rounded"
+                className="mt-2 rounded bg-blue-500 px-4 py-2 text-white"
               >
                 Envoyer
               </button>
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-1 items-center justify-center">
             <p className="text-gray-500">Choisir une conversation</p>
           </div>
         )}
       </div>
       {error && (
-        <div className="absolute bottom-0 left-0 right-0 bg-red-500 text-white p-2 text-center">
+        <div className="absolute inset-x-0 bottom-0 bg-red-500 p-2 text-center text-white">
           {error}
         </div>
       )}
     </div>
   );
 }
-
-le probleme c'est que les messages recu s'affichent correctement mais les messages envoyés sont rendu par rapport a mon message en cas d'erreur: "Message chiffré", 
-
-alors je voudrais mettre a jour mon systeme de sorte a effectuer le chiffrement 2 fois durant l'envoi du message, l'un pour le chiffrement asymetrique (avec la cle publique du destinataire) et l'autre pour le chiffrement symetrique (pour l'envoyeur, chiffrement par sa propre cle privé)  puis lors de l'affichage des messages si l'utilisateur actuel est recepteur on utilise le dechriffrement asymetrique pour decrypter les messages mais s'il est envoyeur on utilise le dechriffrement symetrique.
-
-Pour cela j'aimerais que tu m'aide a modifer encryptionService pour commencer

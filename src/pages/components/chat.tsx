@@ -1,8 +1,11 @@
 /* eslint-disable react-hooks/exhaustive-deps */
+// Chat.tsx
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/router';
+import { useRouter } from 'next/navigation';
+import { useSession } from 'next-auth/react';
+import io, { Socket } from 'socket.io-client';
 import { encryptionService } from '@/services/encryptionService';
 
 interface Conversation {
@@ -20,295 +23,316 @@ interface Message {
   encryptedContent: string;
   encryptedContentCU: string;
   createdAt: string;
+  conversationId: number;
 }
 
-// Fonction principale du composant Chat
 export default function Chat() {
-
+  const { data: session, status } = useSession();
+  const router = useRouter();
+  const [socket, setSocket] = useState<typeof Socket | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null);
   const [message, setMessage] = useState('');
   const [newRecipient, setNewRecipient] = useState('');
   const [error, setError] = useState('');
-  const [currentUserId, setCurrentUserId] = useState(0);
-  const router = useRouter();
 
   useEffect(() => {
-    fetchCurrentUser();
-    fetchConversations();
-    const fetchKeys = async () => {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        router.push('/login');
+    if (status === "unauthenticated") {
+      router.push('/components/login');
+      return;
+    }
+
+    if (status === "authenticated" && session) {
+      // Initialize Socket.IO connection
+      const socketInstance = io(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3000', {
+        auth: {
+          token: session.user?.id
+        },
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+        transports: ['websocket', 'polling']
+      });
+
+      socketInstance.on('connect', () => {
+        console.log('Connected to Socket.IO server');
+      });
+
+      socketInstance.on('new-message', async (newMessage: Message) => {
+        if (selectedConversation?.id === newMessage.conversationId) {
+          setSelectedConversation(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              messages: [...(prev.messages || []), newMessage]
+            };
+          });
+        }
+      });
+
+      setSocket(socketInstance);
+      fetchConversations();
+
+      return () => {
+        socketInstance.disconnect();
+      };
+    }
+  }, [session, status]);
+
+
+  // useEffect(() => {
+  //   if (error) {
+  //     const timer = setTimeout(() => {
+  //       setError(''); // Clear the error after 3 seconds
+  //     }, 3000);
+  //     return () => clearTimeout(timer); // Cleanup timeout on component unmount or error change
+  //   }
+  // }, [error]);
+
+
+  const fetchConversations = async () => {
+    if (!session?.user?.id) return;
+
+    try {
+      const response = await fetch('/api/conversations', {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include' // Important pour inclure les cookies de session
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || 'Failed to fetch conversations');
+      }
+
+      const data = await response.json();
+      setConversations(data.conversations);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Failed to load conversations');
+      console.error(error);
+    }
+  };
+
+  useEffect(() => {
+    if (status === "authenticated" && session?.user?.id) {
+      const privateKey = sessionStorage.getItem(`privateKey_${session.user.id}`);
+      if (!privateKey) {
+        // Si la clé n'est pas dans le sessionStorage, redirigez vers la page de configuration
+        router.push('/components/setup-keys');
         return;
       }
-
-      try {
-        const res = await fetch('/api/get-keys', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const data = await res.json();
-        if (res.ok) {
-          localStorage.setItem('privateKey', data.privateKey);
-          console.log('Private key retrieved and stored');
-        } else {
-          setError(data.message);
-        }
-      } catch (error) {
-        console.error('Error fetching keys:', error);
-        setError('Une erreur est survenue lors de la récupération des clés');
-      }
-    };
-
-    fetchKeys();
-    // if (selectedConversation) {
-    //   fetchMessages(selectedConversation.id);
-    // }
-  }, []);
-  // }, [selectedConversation]);
-
-  // Récupération de l'utilisateur courant
-  const fetchCurrentUser = async () => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      router.push('/login');
-      return;
     }
+  }, [session, status]);
 
+  const decryptMessage = (message: Message) => {
     try {
-      const res = await fetch('/api/current-user', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setCurrentUserId(data.userId);
+      const privateKey = sessionStorage.getItem(`privateKey_${session?.user?.id}`);
+      if (!privateKey) return "Clé manquante";
+
+      if (message.senderId === parseInt(session?.user?.id || '0')) {
+        return encryptionService.decryptSymmetric(message.encryptedContentCU, privateKey);
       } else {
-        setError(data.message);
+        return encryptionService.decryptAsymmetric(message.encryptedContent, privateKey);
       }
     } catch (error) {
-      setError('Une erreur est survenue lors de la récupération des informations utilisateur: ' + error);
+      console.error('Erreur de déchiffrement:', error);
+      return `Erreur de déchiffrement: ${(error as Error).message}`;
     }
   };
 
-  // Récupération des conversations
-  const fetchConversations = async () => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      router.push('/login');
-      return;
-    }
-
-    try {
-      const res = await fetch('/api/conversation', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setConversations(data.conversations);
-      } else {
-        setError(data.message);
-      }
-    } catch (error) {
-      setError('Une erreur est survenue lors de la récuperation des conversations: ' + error);
-    }
-  };
-
-  // Fonction pour envoyer un message
   const sendMessage = async () => {
-    if (!selectedConversation || !message) return;
-
-    const token = localStorage.getItem('token');
-    const privateKey = localStorage.getItem('privateKey');
-
-    if (!token || !privateKey) {
-      router.push('/login');
-      return;
-    }
+    if (!selectedConversation || !message || !session?.user?.id) return;
 
     try {
+      const privateKey = sessionStorage.getItem(`privateKey_${session.user.id}`);
+      if (!privateKey) {
+        throw new Error('Clé privée non trouvée. Veuillez vous reconnecter.');
+      }
 
-      const encryptedForSender = encryptionService.encryptSymmetric(message, privateKey);
-      const encryptedForReceiver = encryptionService.encryptAsymmetric(message, selectedConversation.recipientPublicKey);
+      // 1. Chiffrer pour le destinataire
+      const encryptedContent = encryptionService.encryptAsymmetric(
+        message,
+        selectedConversation.recipientPublicKey
+      );
 
-      const res = await fetch('/api/send-message', {
+      // 2. Chiffrer pour le stockage cloud
+      const encryptedContentCU = encryptionService.encryptSymmetric(
+        message,
+        privateKey
+      );
+
+      // Log pour debug
+      console.log('Message original:', message);
+      console.log('Message chiffré destinataire:', encryptedContent);
+      console.log('Message chiffré cloud:', encryptedContentCU);
+
+      const response = await fetch('/api/send-message', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           conversationId: selectedConversation.id,
           receiverId: selectedConversation.recipientId,
-          encryptedContent: encryptedForReceiver,
-          encryptedContentCU: encryptedForSender,
-        }),
+          encryptedContent,
+          encryptedContentCU
+        })
       });
 
-      const data = await res.json();
-      if (res.ok) {
-        setMessage('');
-        fetchMessages(selectedConversation.id);
-      } else {
-        setError(data.message);
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || 'Failed to send message');
       }
-    } catch (error) {
-      console.error('Error in sendMessage:', error);
-      setError('Une erreur est survenue lors de l\'envoi du message: ' + error);
-    }
-  };
 
+      const data = await response.json();
 
-  // decryptage
-  const decryptMessage = (message: Message) => {
-    const privateKey = localStorage.getItem('privateKey');
-    if (!privateKey) {
-      router.push('/login');
-      return 'Erreur: Clé privée non disponible';
-    }
-
-    try {
-      // Assurer que la clé privée est au bon format pour le déchiffrement
-      const formattedPrivateKey = `-----BEGIN PRIVATE KEY-----\n${privateKey}\n-----END PRIVATE KEY-----`;
-
-      if (message.senderId === currentUserId) {
-        return encryptionService.decryptSymmetric(message.encryptedContentCU, formattedPrivateKey);
-      }
-      else {
-        return encryptionService.decryptAsymmetric(message.encryptedContent, formattedPrivateKey);
-      }
-    } catch (error) {
-      console.error('Erreur de déchiffrement:', error);
-      return 'Message chiffré';
-    }
-  };
-
-
-
-  // Fonction pour récupérer les messages d'une conversation
-  const fetchMessages = async (conversationId: number) => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      router.push('/login');
-      return;
-    }
-
-    try {
-      const res = await fetch(`/api/messages?conversationId=${conversationId}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      // Mise à jour de l'interface
+      setSelectedConversation(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: [...(prev.messages || []), data.data]
+        };
       });
-      const data = await res.json();
-      if (res.ok && selectedConversation) {
-        // Mise à jour de l'état avec les messages récupérés
-        setSelectedConversation({ ...selectedConversation, messages: data.messages });
-      } else {
-        setError(data.message);
+
+      if (socket) {
+        socket.emit('new-message', {
+          conversationId: selectedConversation.id,
+          message: data.data
+        });
       }
+
+      setMessage('');
     } catch (error) {
-      setError('Une erreur est survenue lors de la récuperation des messages: ' + error);
+      console.error('Erreur détaillée:', error);
+      setError(error instanceof Error ? error.message : 'Failed to send message');
     }
   };
 
-  // Fonction pour créer une nouvelle conversation
   const createNewConversation = async () => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      router.push('/login');
-      return;
-    }
+    if (!session?.user?.id) return;
 
     try {
-      const res = await fetch('/api/create-conversation', {
+      const response = await fetch('/api/conversations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ recipientUsername: newRecipient }),
+        credentials: 'include',
+        body: JSON.stringify({ recipientUsername: newRecipient })
       });
-      const data = await res.json();
-      if (res.ok) {
-        // Mise à jour de l'état avec la nouvelle conversation créée
-        setConversations([...conversations, data.conversation]);
-        setNewRecipient('');
-      } else {
-        setError(data.message);
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.message || 'Failed to create conversation');
       }
+
+      const data = await response.json();
+      setConversations([...conversations, data.conversation]);
+      setNewRecipient('');
     } catch (error) {
-      setError('Une erreur est survenue lors de la création de la nouvelle conversation:' + error);
+      setError(error instanceof Error ? error.message : 'Failed to create conversation');
+      console.error(error);
     }
   };
 
-  // Affichage du composant
+  if (status === "loading") {
+    return <div>Loading...</div>;
+  }
+
   return (
     <div className="flex min-h-screen bg-gray-100">
-      <div className="h-screen w-1/4 overflow-y-hidden border-r bg-white">
-        <h2 className="p-4 text-xl font-bold">Conversations</h2>
-        <ul>
-          {conversations.map((conv) => (
-            <li
-              key={conv.id}
-              className="cursor-pointer p-4 hover:bg-gray-100"
-              onClick={() => setSelectedConversation(conv)}
-            >
-              {conv.recipientUsername}
-            </li>
-          ))}
-        </ul>
+      {/* Sidebar - Conversations List */}
+      <div className="w-1/4 overflow-y-auto border-r bg-white">
         <div className="p-4">
-          <input
-            type="text"
-            value={newRecipient}
-            onChange={(e) => setNewRecipient(e.target.value)}
-            className="w-full rounded border p-2 px-4"
-            placeholder="Nouveau déstinataire (Nom d'utilisateur)"
-          />
-          <button
-            onClick={createNewConversation}
-            className="mt-2 w-full rounded bg-green-500 px-4 py-2 text-white"
-          >
-            Nouvelle conversation
-          </button>
+          <h2 className="mb-4 text-xl font-bold">Conversations</h2>
+          <div className="mb-4">
+            <input
+              type="text"
+              value={newRecipient}
+              onChange={(e) => setNewRecipient(e.target.value)}
+              placeholder="New recipient username"
+              className="w-full rounded border p-2"
+            />
+            <button
+              onClick={createNewConversation}
+              className="mt-2 w-full rounded bg-blue-500 p-2 text-white"
+            >
+              New Conversation
+            </button>
+          </div>
+          <div className="space-y-2">
+            {conversations.map((conv) => (
+              <div
+                key={conv.id}
+                onClick={() => setSelectedConversation(conv)}
+                className="cursor-pointer rounded p-3 hover:bg-gray-100"
+              >
+                {conv.recipientUsername}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
-      <div className="flex h-screen w-3/4 flex-col overflow-y-hidden">
+
+      {/* Chat Window */}
+      <div className="flex flex-1 flex-col">
         {selectedConversation ? (
           <>
             <div className="flex-1 overflow-y-auto p-4">
-              {selectedConversation.messages && selectedConversation.messages.map((msg) => (
-                <div key={msg.id} className={`mb-4 ${msg.senderId === selectedConversation.recipientId ? 'text-left' : 'text-right'}`}>
-                  <p className="inline-block rounded-lg bg-blue-500 p-2 text-white">
+              {selectedConversation.messages?.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`mb-4 ${msg.senderId === parseInt(session?.user?.id || '0') ? 'text-right' : 'text-left'}`}
+                >
+                  <div className={`inline-block rounded-lg p-3 ${msg.senderId === parseInt(session?.user?.id || '0')
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-300'
+                    }`}>
                     {decryptMessage(msg)}
-                  </p>
+                  </div>
                 </div>
               ))}
             </div>
-            <div className="bg-white p-4">
-              <input
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                className="w-full rounded border p-2"
-                placeholder="Taper un message..."
-              />
-              <button
-                onClick={sendMessage}
-                className="mt-2 rounded bg-blue-500 px-4 py-2 text-white"
-              >
-                Envoyer
-              </button>
+            <div className="border-t bg-white p-4">
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder="Type a message..."
+                  className="flex-1 rounded border p-2"
+                />
+                <button
+                  onClick={sendMessage}
+                  className="rounded bg-blue-500 px-4 py-2 text-white hover:bg-blue-600"
+                >
+                  Send
+                </button>
+              </div>
             </div>
           </>
         ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <p className="text-gray-500">Choisir une conversation</p>
+          <div className="flex flex-1 items-center justify-center text-gray-500">
+            Select a conversation to start chatting
           </div>
         )}
       </div>
+
+
       {error && (
-        <div className="absolute inset-x-0 bottom-0 bg-red-500 p-2 text-center text-white">
-          {error}
+        <div className="fixed bottom-4 right-4 bg-red-500 text-white p-3 rounded flex items-center space-x-2">
+          <span>{error}</span>
+          <button
+            onClick={() => setError('')} // Manually clear the error
+            className="ml-2 text-white bg-red-700 px-2 rounded hover:bg-red-800"
+          >
+            Close
+          </button>
         </div>
       )}
+
     </div>
   );
 }

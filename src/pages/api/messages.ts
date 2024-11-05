@@ -1,70 +1,72 @@
-// Importation des dépendances nécessaires
+// messages.ts
 import { NextApiRequest, NextApiResponse } from 'next';
 import { PrismaClient } from '@prisma/client';
-import { authService } from '../../services/authService';
+import { getServerSession } from 'next-auth/next';
+import { authOptions } from '@/pages/api/auth/[...nextauth]';
 
-// Création d'une instance de PrismaClient
 const prisma = new PrismaClient();
 
-/**
- * Fonction de gestion de la requête de récupération des messages
- * @param req Requête HTTP
- * @param res Réponse HTTP
- */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const session = await getServerSession(req, res, authOptions);
+
+  if (!session?.user?.id) {
+    return res.status(401).json({ message: 'Non autorisé' });
+  }
 
   if (req.method !== 'GET') {
-    return res.status(405).json({ message: 'Methode supportée' });
+    return res.status(405).json({ message: 'Méthode non supportée' });
   }
 
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) {
-    return res.status(401).json({ message: 'Non autorisée' });
-  }
-
-  const decodedToken = authService.verifyToken(token);
-  if (!decodedToken) {
-    return res.status(401).json({ message: 'Token invalide' });
-  }
-
-  // Récupération de l'ID de conversation dans les paramètres de la requête
   const { conversationId } = req.query;
 
-  // Vérification de la présence de l'ID de conversation
   if (!conversationId) {
     return res.status(400).json({ message: 'ID de conversation requis' });
   }
 
   try {
-    // Récupération des messages de la conversation
-    const messages = await prisma.message.findMany({
-      // Filtre des messages par ID de conversation et par utilisateur dans la conversation
+    // Vérifier que l'utilisateur fait partie de la conversation
+    const conversation = await prisma.conversation.findFirst({
       where: {
-        conversationId: Number(conversationId),
-        conversation: {
-          participants: {
-            some: {
-              id: decodedToken.userId
-            }
+        id: Number(conversationId),
+        participants: {
+          some: {
+            id: Number(session.user.id)
           }
         }
-      },
-      // Ordre les messages par date de création
-      orderBy: {
-        createdAt: 'asc'
-      },
-      // Sélectionne les champs à récupérer
-      select: {
-        id: true,
-        senderId: true,
-        encryptedContent: true,
-        createdAt: true
       }
     });
 
-    // Retour des messages sous forme de JSON
-    res.status(200).json({ messages });
+    if (!conversation) {
+      return res.status(403).json({ message: 'Accès non autorisé à cette conversation' });
+    }
+
+    // Récupérer les messages
+    const messages = await prisma.message.findMany({
+      where: {
+        conversationId: Number(conversationId)
+      },
+      orderBy: {
+        createdAt: 'asc'
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            username: true
+          }
+        },
+        receiver: {
+          select: {
+            id: true,
+            username: true
+          }
+        }
+      }
+    });
+
+    return res.status(200).json({ messages });
   } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la recuperation des messages: ' + error });
+    console.error('Erreur lors de la récupération des messages:', error);
+    return res.status(500).json({ message: 'Erreur serveur' });
   }
 }
