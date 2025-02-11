@@ -14,7 +14,7 @@ export default function Home() {
 
       {session ? (
         <div className="flex flex-col items-center space-y-4">
-          <div className="text-center mb-4">
+          <div className="mb-4 text-center">
             Bonjour, {session.user?.name || session.user?.email}
           </div>
           <button

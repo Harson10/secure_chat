@@ -1,39 +1,41 @@
 import { NextApiRequest, NextApiResponse } from 'next';
-import { PrismaClient } from '@prisma/client';
-import { authService } from '../../services/authService';
+import { authenticator } from 'otplib';
 
-const prisma = new PrismaClient();
-
-/**
- * Fonction de gestion de la vérification de l'authentification à deux facteurs
- * @param req Requête HTTP
- * @param res Réponse HTTP
- */
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
   if (req.method !== 'POST') {
     return res.status(405).json({ message: 'Method not allowed' });
   }
 
-  const { userId, token } = req.body;
-
   try {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const { secret, token } = req.body;
 
-    if (!user || !user.twoFactorSecret) {
-      return res.status(400).json({ message: 'Utilisateur invalide ou aucun jeton de deux facteurs configuré' });
+    if (!secret || !token) {
+      return res.status(400).json({ message: 'Données manquantes' });
     }
 
-    const isTokenValid = authService.verifyTwoFactorToken(token, user.twoFactorSecret);
+    // Vérification du code
+    const isValid = authenticator.verify({
+      token,
+      secret
+    });
 
-    if (!isTokenValid) {
-      return res.status(400).json({ message: 'Token à deux facteurs invalide' });
+    if (!isValid) {
+      return res.status(400).json({ message: 'Code de vérification incorrect' });
     }
 
-    const jwtToken = authService.generateToken(user.id);
+    // Si le code est valide, on peut retourner les données nécessaires
+    return res.status(200).json({
+      message: 'Vérification réussie',
+      success: true
+    });
 
-    res.status(200).json({ user: { id: user.id, username: user.username, email: user.email }, token: jwtToken });
   } catch (error) {
-    res.status(400).json({ message: 'Erreur lors de la vérification de l\'authentification à deux facteurs: ' + error });
+    console.error('Erreur lors de la vérification 2FA:', error);
+    return res.status(500).json({
+      message: 'Une erreur est survenue lors de la vérification'
+    });
   }
 }

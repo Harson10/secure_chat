@@ -1,10 +1,15 @@
-// pages/api/conversations.ts
 import { NextApiRequest, NextApiResponse } from 'next';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/pages/api/auth/[...nextauth]';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '@/lib/prisma';
 
-const prisma = new PrismaClient();
+export const config = {
+  api: {
+    responseLimit: false
+  }
+}
+
+const MESSAGES_PER_PAGE = 50;
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions);
@@ -15,36 +20,68 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   if (req.method === 'GET') {
     try {
+      const page = parseInt(req.query.page as string) || 1;
+      const userId = parseInt(session.user.id);
+
       const conversations = await prisma.conversation.findMany({
         where: {
           participants: {
             some: {
-              id: parseInt(session.user.id)
+              id: userId
             }
           }
         },
         include: {
-          participants: true,
+          participants: {
+            select: {
+              id: true,
+              username: true,
+              publicKey: true
+            }
+          },
           messages: {
             orderBy: {
-              createdAt: 'asc'
+              createdAt: 'desc'
+            },
+            take: MESSAGES_PER_PAGE,
+            skip: (page - 1) * MESSAGES_PER_PAGE,
+            select: {
+              id: true,
+              senderId: true,
+              receiverId: true,
+              encryptedContent: true,
+              encryptedContentCU: true,
+              createdAt: true
+            }
+          },
+          _count: {
+            select: {
+              messages: true
             }
           }
+        },
+        orderBy: {
+          updatedAt: 'desc'
         }
       });
 
       const formattedConversations = conversations.map(conv => {
-        const recipient = conv.participants.find(p => p.id !== parseInt(session.user.id));
+        const recipient = conv.participants.find(p => p.id !== userId);
         return {
           id: conv.id,
           recipientId: recipient?.id,
           recipientUsername: recipient?.username,
           recipientPublicKey: recipient?.publicKey,
-          messages: conv.messages
+          messages: conv.messages.reverse(), // Remettre dans l'ordre chronologique
+          totalMessages: conv._count.messages,
+          hasMoreMessages: conv._count.messages > page * MESSAGES_PER_PAGE
         };
       });
 
-      return res.status(200).json({ conversations: formattedConversations });
+      return res.status(200).json({
+        conversations: formattedConversations,
+        currentPage: page
+      });
     } catch (error) {
       console.error('Error fetching conversations:', error);
       return res.status(500).json({ message: 'Erreur lors de la récupération des conversations' });
@@ -59,54 +96,65 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     try {
-      const recipient = await prisma.user.findUnique({
-        where: { username: recipientUsername }
-      });
+      // Transaction pour la création de conversation
+      const result = await prisma.$transaction(async (tx) => {
+        const recipient = await tx.user.findUnique({
+          where: { username: recipientUsername },
+          select: {
+            id: true,
+            username: true,
+            publicKey: true
+          }
+        });
 
-      if (!recipient) {
-        return res.status(404).json({ message: 'Destinataire non trouvé' });
-      }
-
-      // Vérifier si une conversation existe déjà
-      const existingConversation = await prisma.conversation.findFirst({
-        where: {
-          AND: [
-            { participants: { some: { id: parseInt(session.user.id) } } },
-            { participants: { some: { id: recipient.id } } }
-          ]
+        if (!recipient) {
+          throw new Error('Destinataire non trouvé');
         }
-      });
 
-      if (existingConversation) {
-        return res.status(400).json({ message: 'Une conversation existe déjà avec cet utilisateur' });
-      }
-
-      const conversation = await prisma.conversation.create({
-        data: {
-          participants: {
-            connect: [
-              { id: parseInt(session.user.id) },
-              { id: recipient.id }
+        // Vérification optimisée de l'existence
+        const existingCount = await tx.conversation.count({
+          where: {
+            AND: [
+              { participants: { some: { id: parseInt(session.user.id) } } },
+              { participants: { some: { id: recipient.id } } }
             ]
           }
-        },
-        include: {
-          participants: true
+        });
+
+        if (existingCount > 0) {
+          throw new Error('Une conversation existe déjà avec cet utilisateur');
         }
+
+        // Création optimisée
+        const conversation = await tx.conversation.create({
+          data: {
+            participants: {
+              connect: [
+                { id: parseInt(session.user.id) },
+                { id: recipient.id }
+              ]
+            }
+          },
+          select: {
+            id: true
+          }
+        });
+
+        return {
+          id: conversation.id,
+          recipientId: recipient.id,
+          recipientUsername: recipient.username,
+          recipientPublicKey: recipient.publicKey,
+          messages: []
+        };
       });
 
-      const formattedConversation = {
-        id: conversation.id,
-        recipientId: recipient.id,
-        recipientUsername: recipient.username,
-        recipientPublicKey: recipient.publicKey,
-        messages: []
-      };
-
-      return res.status(201).json({ conversation: formattedConversation });
+      return res.status(201).json({ conversation: result });
     } catch (error) {
       console.error('Error creating conversation:', error);
-      return res.status(500).json({ message: 'Erreur lors de la création de la conversation' });
+      return res.status(500).json({
+        message: error instanceof Error ? error.message : 'Erreur lors de la création de la conversation'
+      });
     }
   }
 

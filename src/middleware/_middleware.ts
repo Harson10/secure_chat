@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-// pages/api/_middleware.ts
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 

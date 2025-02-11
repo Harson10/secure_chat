@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// server.ts
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { parse } from 'url';

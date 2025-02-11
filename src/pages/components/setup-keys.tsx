@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/router';
-// import { encryptionService } from '@/services/encryptionService';
 
 export default function SetupKeys() {
     const { data: session, status } = useSession();
@@ -61,7 +60,7 @@ export default function SetupKeys() {
             <div className="flex min-h-screen items-center justify-center">
                 <div className="text-center">
                     <h1 className="mb-4 text-2xl font-bold">Setting up encryption...</h1>
-                    <div className="animate-spin rounded-full border-b-2 border-t-2 border-blue-500 h-12 w-12 mx-auto"></div>
+                    <div className="mx-auto size-12 animate-spin rounded-full border-y-2 border-blue-500"></div>
                 </div>
             </div>
         );
@@ -75,7 +74,7 @@ export default function SetupKeys() {
                     <p>{error}</p>
                     <button
                         onClick={() => window.location.reload()}
-                        className="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                        className="mt-4 rounded bg-blue-500 px-4 py-2 text-white hover:bg-blue-600"
                     >
                         Try Again
                     </button>

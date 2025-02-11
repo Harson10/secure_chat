@@ -1,6 +1,5 @@
+/* eslint-disable @next/next/no-img-element */
 /* eslint-disable react/no-unescaped-entities */
-'use client';
-
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
@@ -8,8 +7,13 @@ export default function Register() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [enable2FA, setEnable2FA] = useState(false);
+  const [qrCode, setQrCode] = useState('');
+  const [secret2FA, setSecret2FA] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [step, setStep] = useState(1); // 1: formulaire initial, 2: configuration 2FA
 
   const router = useRouter();
 
@@ -19,206 +23,211 @@ export default function Register() {
     setError('');
 
     try {
+      // Première étape : inscription de base
       const res = await fetch('/api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password }),
+        body: JSON.stringify({
+          username,
+          email,
+          password,
+          enable2FA
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.message);
+      }
+
+      if (enable2FA) {
+        // Si 2FA activé, on stocke les données nécessaires et on passe à l'étape 2
+        setQrCode(data.qrCode);
+        setSecret2FA(data.secret2FA);
+        setStep(2);
+      } else {
+        // Si pas de 2FA, on termine l'inscription
+        sessionStorage.setItem('privateKey', data.privateKey);
+        router.push('/components/login');
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Une erreur est survenue lors de l\'inscription');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleVerify2FA = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsLoading(true);
+    setError('');
+
+    try {
+      const res = await fetch('/api/verify-2fa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret: secret2FA,
+          token: verificationCode
+        }),
       });
 
       const data = await res.json();
 
       if (res.ok) {
-        // Stockage sécurisé des données
         sessionStorage.setItem('privateKey', data.privateKey);
-        // Redirection vers la page de connexion après inscription
         router.push('/components/login');
       } else {
-        setError(data.message || 'Une erreur est survenue lors de l\'inscription');
+        setError(data.message || 'Code de vérification incorrect');
       }
     } catch (error) {
-      setError('Une erreur est survenue. Veuillez réessayer plus tard.');
+      setError('Une erreur est survenue lors de la vérification');
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-md w-full space-y-8">
+    <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4 py-12 sm:px-6 lg:px-8">
+      <div className="w-full max-w-md space-y-8">
         <div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Inscription
+            {step === 1 ? 'Inscription' : 'Configuration de la 2FA'}
           </h2>
         </div>
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          <div className="rounded-md shadow-sm -space-y-px">
-            <div>
-              <label htmlFor="username" className="sr-only">
-                Nom d'utilisateur
-              </label>
-              <input
-                id="username"
-                name="username"
-                type="text"
-                required
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Nom d'utilisateur"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                disabled={isLoading}
-              />
-            </div>
-            <div>
-              <label htmlFor="email" className="sr-only">
-                Email
-              </label>
-              <input
-                id="email"
-                name="email"
-                type="email"
-                required
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Adresse email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={isLoading}
-              />
-            </div>
-            <div>
-              <label htmlFor="password" className="sr-only">
-                Mot de passe
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                required
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Mot de passe"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={isLoading}
-              />
-            </div>
-          </div>
 
-          {error && (
-            <div className="text-red-500 text-sm text-center">
-              {error}
+        {step === 1 ? (
+          <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
+            <div className="-space-y-px rounded-md shadow-sm">
+              <div>
+                <label htmlFor="username" className="sr-only">
+                  Nom d'utilisateur
+                </label>
+                <input
+                  id="username"
+                  name="username"
+                  type="text"
+                  required
+                  className="relative block w-full appearance-none rounded-none rounded-t-md border border-gray-300 px-3 py-2 text-gray-900 placeholder:text-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+                  placeholder="Nom d'utilisateur"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
+              <div>
+                <label htmlFor="email" className="sr-only">
+                  Email
+                </label>
+                <input
+                  id="email"
+                  name="email"
+                  type="email"
+                  required
+                  className="relative block w-full appearance-none rounded-none border border-gray-300 px-3 py-2 text-gray-900 placeholder:text-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+                  placeholder="Adresse email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
+              <div>
+                <label htmlFor="password" className="sr-only">
+                  Mot de passe
+                </label>
+                <input
+                  id="password"
+                  name="password"
+                  type="password"
+                  required
+                  className="relative block w-full appearance-none rounded-none rounded-b-md border border-gray-300 px-3 py-2 text-gray-900 placeholder:text-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+                  placeholder="Mot de passe"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
             </div>
-          )}
 
-          <div>
-            <button
-              type="submit"
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-              disabled={isLoading}
-            >
-              {isLoading ? 'Inscription en cours...' : 'S\'inscrire'}
-            </button>
-          </div>
-        </form>
+            <div className="flex items-center">
+              <input
+                id="enable2FA"
+                name="enable2FA"
+                type="checkbox"
+                className="size-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                checked={enable2FA}
+                onChange={(e) => setEnable2FA(e.target.checked)}
+                disabled={isLoading}
+              />
+              <label htmlFor="enable2FA" className="ml-2 block text-sm text-gray-900">
+                Activer l'authentification à deux facteurs (2FA)
+              </label>
+            </div>
+
+            {error && (
+              <div className="text-center text-sm text-red-500">
+                {error}
+              </div>
+            )}
+
+            <div>
+              <button
+                type="submit"
+                className="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                disabled={isLoading}
+              >
+                {isLoading ? 'Inscription en cours...' : 'S\'inscrire'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form className="mt-8 space-y-6" onSubmit={handleVerify2FA}>
+            <div className="space-y-4">
+              {qrCode && (
+                <div className="flex justify-center">
+                  <img src={qrCode} alt="QR Code 2FA" className="size-48" />
+                </div>
+              )}
+              <p className="text-center text-sm text-gray-600">
+                Scannez ce QR code avec votre application d'authentification (Google Authenticator, Authy, etc.)
+              </p>
+              <div>
+                <label htmlFor="verificationCode" className="sr-only">
+                  Code de vérification
+                </label>
+                <input
+                  id="verificationCode"
+                  name="verificationCode"
+                  type="text"
+                  required
+                  className="relative block w-full appearance-none rounded-md border border-gray-300 px-3 py-2 text-gray-900 placeholder:text-gray-500 focus:z-10 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm"
+                  placeholder="Code de vérification"
+                  value={verificationCode}
+                  onChange={(e) => setVerificationCode(e.target.value)}
+                  disabled={isLoading}
+                />
+              </div>
+            </div>
+
+            {error && (
+              <div className="text-center text-sm text-red-500">
+                {error}
+              </div>
+            )}
+
+            <div>
+              <button
+                type="submit"
+                className="group relative flex w-full justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+                disabled={isLoading}
+              >
+                {isLoading ? 'Vérification...' : 'Vérifier et terminer l\'inscription'}
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );
 }
-
-// /* eslint-disable react/no-unescaped-entities */
-// 'use client';
-
-// import { useState } from 'react';
-// import { useRouter } from 'next/router';
-
-// export default function Register() {
-
-//   const [username, setUsername] = useState('');
-//   const [email, setEmail] = useState('');
-//   const [password, setPassword] = useState('');
-//   const [error, setError] = useState('');
-
-//   const router = useRouter();
-
-//   const handleSubmit = async (e: React.FormEvent) => {
-//     e.preventDefault();
-
-//     try {
-//       const res = await fetch('/api/register', {
-//         method: 'POST',
-//         headers: { 'Content-Type': 'application/json' },
-//         body: JSON.stringify({ username, email, password }),
-//       });
-
-//       const data = await res.json();
-
-//       if (res.ok) {
-//         localStorage.setItem('token', data.token);
-//         localStorage.setItem('privateKey', data.privateKey);
-
-//         router.push('/components/chat');
-//       } else {
-//         setError(data.message);
-//       }
-//     } catch (error) {
-//       setError('An error occurred. Please try again: ' + error);
-//     }
-//   };
-
-//   return (
-//     <div className="min-h-screen bg-gray-100 flex flex-col justify-center items-center">
-//       <h1 className="text-3xl font-bold mb-6">Register</h1>
-//       <form onSubmit={handleSubmit} className="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
-//         <div className="mb-4">
-//           <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="username">
-//             Nom d'utilisateur
-//           </label>
-//           <input
-//             className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-//             id="username"
-//             type="text"
-//             placeholder="Nom d'utilisateur"
-//             value={username}
-//             onChange={(e) => setUsername(e.target.value)}
-//             required
-//           />
-//         </div>
-//         <div className="mb-4">
-//           <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="email">
-//             Email
-//           </label>
-//           <input
-//             className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-//             id="email"
-//             type="email"
-//             placeholder="Email"
-//             value={email}
-//             onChange={(e) => setEmail(e.target.value)}
-//             required
-//           />
-//         </div>
-//         <div className="mb-6">
-//           <label className="block text-gray-700 text-sm font-bold mb-2" htmlFor="password">
-//             Mot de passe
-//           </label>
-//           <input
-//             className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 mb-3 leading-tight focus:outline-none focus:shadow-outline"
-//             id="password"
-//             type="password"
-//             placeholder="********"
-//             value={password}
-//             onChange={(e) => setPassword(e.target.value)}
-//             required
-//           />
-//         </div>
-//         {error && <p className="text-red-500 text-xs italic mb-4">{error}</p>}
-//         <div className="flex items-center justify-between">
-//           <button
-//             className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-//             type="submit"
-//           >
-//             S'inscrire
-//           </button>
-//         </div>
-//       </form>
-//     </div>
-//   );
-// }
